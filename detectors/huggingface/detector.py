@@ -4,6 +4,7 @@ import sys
 sys.path.insert(0, os.path.abspath(".."))
 import math
 import torch
+import json
 from transformers import (
     AutoConfig,
     AutoTokenizer,
@@ -18,6 +19,26 @@ from scheme import (
 )
 import gc
 
+
+def _parse_safe_labels_env():
+    if os.environ.get("SAFE_LABELS"):
+        try:
+            parsed = json.loads(os.environ.get("SAFE_LABELS"))
+            if isinstance(parsed, int):
+                logger.info(f"Successfully parsed SAFE_LABELS env var: classification label {parsed} will be used as the 'safe' label")
+                return [parsed]
+            if isinstance(parsed, list) and all(isinstance(x, int) for x in parsed):
+                logger.info(
+                    f"Successfully parsed SAFE_LABELS env var: classification labels {parsed} will be used as the 'safe' labels")
+                return parsed
+        except json.decoder.JSONDecodeError as e:
+            logger.warning(f"Could not parse SAFE_LABELS env var {e}: falling back on default setting, where classification label 0 is the 'safe' label")
+            return [0]
+    else:
+        logger.info("SAFE_LABELS env var not set: falling back on default setting, where classification label 0 is the 'safe' label")
+        return [0]
+
+
 class Detector:
     risk_names = [
         "harm",
@@ -29,7 +50,7 @@ class Detector:
         "violence",
     ]
 
-    def __init__(self):
+    def __init__(self, safe_labels=None):
         """
         Initialize the Detector class by setting up the model, tokenizer, and device.
         """
@@ -37,6 +58,7 @@ class Detector:
         self.model = None
         self.cuda_device = None
         self.model_name = "unknown"
+        self.safe_labels = _parse_safe_labels_env()
 
         model_files_path = os.environ.get("MODEL_DIR")
         if not model_files_path:
@@ -241,23 +263,28 @@ class Detector:
             prediction = torch.argmax(logits, dim=1).detach().cpu().numpy().tolist()[0]
             prediction_labels = self.model.config.id2label[prediction]
             probability = (
-                torch.softmax(logits, dim=1).detach().cpu().numpy()[:, 1].tolist()[0]
+                torch.softmax(logits, dim=1).detach().cpu().numpy()[0].tolist()[prediction]
             )
-            content_analyses.append(
-                ContentAnalysisResponse(
-                    start=0,
-                    end=len(text),
-                    detection=self.model_name,
-                    detection_type="sequence_classification",
-                    score=probability,
-                    sequence_classification=prediction_labels,
-                    sequence_probability=probability,
-                    token_classifications=None,
-                    token_probabilities=None,
-                    text=text,
-                    evidences=[],
+            if prediction not in self.safe_labels:
+                content_analyses.append(
+                    ContentAnalysisResponse(
+                        start=0,
+                        end=len(text),
+                        detection=self.model_name,
+                        detection_type=prediction_labels,
+                        score=probability,
+                        sequence_classification=prediction_labels,
+                        sequence_probability=probability,
+                        token_classifications=None,
+                        token_probabilities=None,
+                        text=text,
+                        evidences=[],
+                    )
                 )
-            )
+            else:
+                logger.info(f"Predicted label={prediction_labels} with probability={probability}. This label is in the safe labels, so no detections will be reported.")
+
+        logger.info(f"Analyses: {content_analyses}")
         return content_analyses
 
     def run(self, input: ContentAnalysisHttpRequest) -> ContentsAnalysisResponse:

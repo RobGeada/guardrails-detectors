@@ -1,3 +1,4 @@
+import argparse
 import os
 import sys
 from contextlib import asynccontextmanager
@@ -18,7 +19,11 @@ from scheme import (
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    app.set_detector(Detector())
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--safe-labels", nargs="+", type=int, default=None)
+    args, _ = parser.parse_known_args()
+    app.state.safe_labels = args.safe_labels
+    app.set_detector(Detector(safe_labels=args.safe_labels))
     yield
     # Clean up the ML models and release the resources
     detector: Detector = app.get_detector()
